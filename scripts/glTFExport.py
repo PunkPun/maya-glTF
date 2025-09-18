@@ -14,11 +14,17 @@ import maya.cmds
 import maya.OpenMaya as OpenMaya
 
 try:
-    from PySide.QtGui import QImage, QColor, qRed, qGreen, qBlue, QImageWriter
-    from PySide.QtCore import QByteArray
+    # Maya 2025+ (including 2026)
+    from PySide6.QtGui import QImage, QColor, qRed, qGreen, qBlue, QImageWriter
+    from PySide6.QtCore import QByteArray
 except ImportError:
-    from PySide2.QtGui import QImage, QColor, qRed, qGreen, qBlue, QImageWriter
-    from PySide2.QtCore import QByteArray
+    # For older Maya versions
+    try:
+        from PySide2.QtGui import QImage, QColor, qRed, qGreen, qBlue, QImageWriter
+        from PySide2.QtCore import QByteArray
+    except ImportError:
+        from PySide.QtGui import QImage, QColor, qRed, qGreen, qBlue, QImageWriter
+        from PySide.QtCore import QByteArray
 
 # TODO don't export hidden nodes?
 
