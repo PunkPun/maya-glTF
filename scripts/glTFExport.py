@@ -864,9 +864,12 @@ class AnimationSampler(ExportItem):
                 # Use get attr at a time because not every attr might have a keyframe
                 values.append(maya.cmds.getAttr(node.maya_node+'.'+self.attr_map[path], time=keyframe)[0])
         else:
+            # Evaluate rotation at time without permanently changing timeline
+            prev_time = maya.cmds.currentTime(query=True)
             for keyframe in keyframes:
                 maya.cmds.currentTime(keyframe, edit=True)
                 values.append(node._get_rotation_quaternion())
+            maya.cmds.currentTime(prev_time, edit=True)
         if not len(Buffer.instances):
             primary_buffer = Buffer('primary_buffer')
         else:
