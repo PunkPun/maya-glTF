@@ -18,7 +18,7 @@ class GLTFTranslator(OpenMayaMPx.MPxFileTranslator):
     def haveReadMethod(self):
         return False
     def filter(self):
-        return "*.{}".format(FILE_EXT)
+        return "*.glb;*.gltf"
     def defaultExtension(self):
         return FILE_EXT
     def writer( self, file_obj, opt_string, access_mode ): 
