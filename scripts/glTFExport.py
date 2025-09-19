@@ -385,7 +385,6 @@ class Mesh(ExportItem):
 
     def to_json(self):
         mesh_def = {"primitives" : [ {
-                        "mode": 4,
                         "attributes" : {
                           "POSITION" : self.position_accessor.index,
                           "NORMAL": self.normal_accessor.index ,
@@ -485,8 +484,6 @@ class Mesh(ExportItem):
             idx_component_type = ComponentTypes.UINT
 
         self.indices_accessor = Accessor(indices, "SCALAR", idx_component_type, 34963, primary_buffer, name=self.name + '_idx')
-        self.indices_accessor.min_ = [0]
-        self.indices_accessor.max_ = [len(positions) - 1]
         self.position_accessor = Accessor(positions, "VEC3", ComponentTypes.FLOAT, 34962, primary_buffer, name=self.name + '_pos')
         bbox_max = boundingBox.max()
         self.position_accessor.max_ = [bbox_max[0],bbox_max[1],bbox_max[2]]
@@ -1060,9 +1057,10 @@ class BufferView(ExportItem):
     def to_json(self):
         buffer_view_def = {
           "buffer" : self.buffer.index,
-          "byteOffset" : self.byte_offset,
           "byteLength" : self.byte_length,
         }
+        if self.byte_offset != 0 and self.byte_offset is not None:
+            buffer_view_def["byteOffset"] = self.byte_offset
         if self.target:
             buffer_view_def['target'] = self.target
         return buffer_view_def
@@ -1118,11 +1116,12 @@ class Accessor(ExportItem):
     def to_json(self):
         accessor_def = {
           "bufferView" : self.buffer_view.index,
-          "byteOffset" : self.byte_offset,
           "componentType" : self.component_type,
           "count" : len(self.src_data),
           "type" : self.type_
         }
+        if self.byte_offset != 0 and self.byte_offset is not None:
+            accessor_def["byteOffset"] = self.byte_offset
         if self.max_:
             accessor_def['max'] = self.max_
         if self.min_:
