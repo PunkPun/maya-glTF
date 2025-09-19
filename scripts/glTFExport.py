@@ -107,8 +107,7 @@ class ExportSettings(object):
 
 
 class GLTFExporter(object):
-    # TODO: Add VFlip option
-    def __init__(self, file_path, resource_format='bin', anim='keyed', vflip=True):
+    def __init__(self, **kwargs):
         self.output = {
             "asset": {
                 "version": "2.0",
@@ -128,10 +127,10 @@ class GLTFExporter(object):
         BufferView.set_defaults()
         Accessor.set_defaults()
 
-        ExportSettings.out_file = file_path
-        ExportSettings.resource_format = resource_format
-        ExportSettings.anim = anim
-        ExportSettings.vflip = vflip
+        ExportSettings.out_file = kwargs.get('file_path', '')
+        ExportSettings.resource_format = kwargs.get('resource_format', 'bin')
+        ExportSettings.anim = kwargs.get('anim', 'keyed')
+        ExportSettings.vflip = kwargs.get('vflip', True)
 
     def run(self):
         if not ExportSettings.out_file:
@@ -214,8 +213,8 @@ class GLTFExporter(object):
                 with open(ExportSettings.out_dir + "/" + buffer.uri, 'wb') as outfile:
                     outfile.write(buffer.byte_str)
 
-def export(file_path=None, resource_format='bin', anim='keyed', vflip=True, selection=False):
-    GLTFExporter(file_path, resource_format, anim, vflip).run()
+def export(**kwargs):
+    GLTFExporter(**kwargs).run()
 
 
 class GLTFEncoder(json.JSONEncoder):

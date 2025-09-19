@@ -26,7 +26,8 @@ class GLTFTranslator(OpenMayaMPx.MPxFileTranslator):
         try:
             if access_mode == OpenMayaMPx.MPxFileTranslator.kExportAccessMode:
                 self._parse_args(opt_string)
-                glTFExport.export(file_obj.fullName(), **self.kwargs)
+                self.kwargs['file_path'] = fullName
+                glTFExport.export(**self.kwargs)
             elif access_mode == OpenMayaMPx.MPxFileTranslator.kExportActiveAccessMode:
                 self._parse_args(opt_string)
                 raise NotImplementedError("Exported Selection not implemented yet.  Use Export All.")
