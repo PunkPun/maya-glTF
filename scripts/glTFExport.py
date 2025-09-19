@@ -476,10 +476,14 @@ class Mesh(ExportItem):
         else:
             primary_buffer = Buffer.instances[0]
 
-        if len(positions) >= 0xffff:
-            idx_component_type = ComponentTypes.UINT
-        else:
+        max_index = max(indices) if indices else 0
+        if max_index <= 255:
+            idx_component_type = ComponentTypes.UBYTE
+        elif max_index <= 65535:
             idx_component_type = ComponentTypes.USHORT
+        else:
+            idx_component_type = ComponentTypes.UINT
+
         self.indices_accessor = Accessor(indices, "SCALAR", idx_component_type, 34963, primary_buffer, name=self.name + '_idx')
         self.indices_accessor.min_ = [0]
         self.indices_accessor.max_ = [len(positions) - 1]
@@ -1065,6 +1069,7 @@ class BufferView(ExportItem):
 
 
 class ComponentTypes(object):
+    UBYTE = 5121
     USHORT = 5123
     UINT = 5125
     FLOAT = 5126
@@ -1087,6 +1092,7 @@ class Accessor(ExportItem):
         "VEC4":4
     }
     component_type_codes = {
+        ComponentTypes.UBYTE:"B", # unsigned byte
         ComponentTypes.USHORT:"H", # unsigned short
         ComponentTypes.UINT:"I", # unsigned int
         ComponentTypes.FLOAT:"f"  # float
