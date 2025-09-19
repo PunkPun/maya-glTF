@@ -41,28 +41,17 @@ global proc int glTFTranslatorOpts ( string $parent,
 	
 	if ($action == "post") {
 		setParent $parent;
+		columnLayout -adjustableColumn true glTFOptsCol;
+			optionMenu -label "Resources Format:" -annotation "Only applies to gltf format (not glb)" resFormatOpts;
+				menuItem -label "Single .bin";
+				menuItem -label "Copy source files";
+				menuItem -label "Embedded";
+			optionMenu -label "Export Animation:" animOpts;
+				menuItem -label "None";
+				menuItem -label "Keyed";
+			radioButtonGrp -numberOfRadioButtons 2 -label "Flip V" -labelArray2 "On" "Off" vFlipOpts;
+		setParent ..;
 
-	    formLayout glTFOptsForm;
-            //radioButtonGrp
-            //        -label "Resources Format:" -vertical
-            //        -numberOfRadioButtons 3  -columnWidth4 50 80 110 110
-            //        -annotation "Only applies to gltf format (not glb)"
-            //        -labelArray3 "Single .bin" "Copy source files" "Embedded" resFormatGrp;
-            //formLayout -e -attachPosition  resFormatGrp left -120 25 -attachPosition resFormatGrp right 0 75 -attachPosition resFormatGrp top 0 0 glTFOptsForm;
-            optionMenu -label "Resources Format:" -annotation "Only applies to gltf format (not glb)" resFormatOpts;
-                menuItem -label "Single .bin";
-                menuItem -label "Copy source files";
-                menuItem -label "Embedded";
-            formLayout -e -attachPosition  resFormatOpts left -77 25  -attachPosition resFormatOpts top 0 0 glTFOptsForm;
-            optionMenu -label "Export Animation:" animOpts;
-                menuItem -label "None";
-                menuItem -label "Keyed";
-            formLayout -e -attachPosition  animOpts left -75 25 -attachPosition animOpts top 0 42 glTFOptsForm;
-            //checkBox -label "Export Animation" animInclude;
-            //formLayout -e -attachPosition  animInclude left 25 25 -attachPosition animInclude right 0 75 -attachPosition animInclude top 0 68 glTFOptsForm;
-            checkBox -label "Flip UVs -- V-Flip" vFlip;
-            formLayout -e -attachPosition  vFlip left 25 25 -attachPosition vFlip right 0 75 -attachPosition vFlip top 0 75 glTFOptsForm;
-                    
 		// Now set to current settings.
 		if (size($initialSettings) > 0) {
 			tokenize($initialSettings, ";", $optionList);
@@ -74,21 +63,21 @@ global proc int glTFTranslatorOpts ( string $parent,
 					} else if ($optionBreakDown[1] == "source"){
 						optionMenu -edit -select 2 resFormatOpts;
 					} else {
-                        optionMenu -edit -select 3 resFormatOpts;
-                    }
+						optionMenu -edit -select 3 resFormatOpts;
+					}
 				}
-                else if ($optionBreakDown[0] == "anim") {
+				else if ($optionBreakDown[0] == "anim") {
 					if ($optionBreakDown[1] == "none") {
 						optionMenu -edit -select 1 animOpts;
-					} else {
+					} else if ($optionBreakDown[1] == "keyed") {
 						optionMenu -edit -select 2 animOpts;
 					}
 				}
-                else if ($optionBreakDown[0] == "vFlip") {
+				else if ($optionBreakDown[0] == "vFlip") {
 					if ($optionBreakDown[1] == "0") {
-						checkBox -edit -value 0 vFlip;
+					radioButtonGrp -edit -select 2 vFlipOpts;
 					} else {
-						checkBox -edit -value 1 vFlip;
+						radioButtonGrp -edit -select 1 vFlipOpts;
 					}
 				}
 			}
@@ -105,15 +94,15 @@ global proc int glTFTranslatorOpts ( string $parent,
         } else {
 			$currentOptions = $currentOptions + "resFormat=embedded;";
 		}
-        if (`optionMenu -q -select animOpts` == 1) {
+		if (`optionMenu -q -select animOpts` == 1) {
 			$currentOptions = $currentOptions + "anim=none;";
 		} else {
 			$currentOptions = $currentOptions + "anim=keyed;";
 		}
-        if (`checkBox -q -value vFlip` == 0) {
-			$currentOptions = $currentOptions + "vFlip=0;";
+		if (`radioButtonGrp -q -select vFlipOpts` == 2) {
+			$currentOptions += "vFlip=0;";
 		} else {
-			$currentOptions = $currentOptions + "vFlip=1;";
+			$currentOptions += "vFlip=1;";
 		}
 		eval($resultCallback+" \""+$currentOptions+"\"");
 		$result = 1;
