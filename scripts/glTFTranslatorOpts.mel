@@ -49,7 +49,12 @@ global proc int glTFTranslatorOpts ( string $parent,
 			optionMenu -label "Export Animation:" animOpts;
 				menuItem -label "None";
 				menuItem -label "Keyed";
+				menuItem -label "Frames as Scenes";
+			radioButtonGrp -numberOfRadioButtons 2 -label "Materials" -labelArray2 "On" "Off" includeMaterialsOpts;
+			radioButtonGrp -numberOfRadioButtons 2 -label "Normals" -labelArray2 "On" "Off" includeNormalsOpts;
 			radioButtonGrp -numberOfRadioButtons 2 -label "Flip V" -labelArray2 "On" "Off" vFlipOpts;
+			radioButtonGrp -numberOfRadioButtons 2 -label "Apply Transforms" -labelArray2 "On" "Off" transformsAppliedOpts;
+			radioButtonGrp -numberOfRadioButtons 2 -label "Join Child Meshes" -labelArray2 "On" "Off" joinMeshesOpts;
 		setParent ..;
 
 		// Now set to current settings.
@@ -71,6 +76,8 @@ global proc int glTFTranslatorOpts ( string $parent,
 						optionMenu -edit -select 1 animOpts;
 					} else if ($optionBreakDown[1] == "keyed") {
 						optionMenu -edit -select 2 animOpts;
+					} else if ($optionBreakDown[1] == "frames") {
+						optionMenu -edit -select 3 animOpts;
 					}
 				}
 				else if ($optionBreakDown[0] == "vFlip") {
@@ -78,6 +85,34 @@ global proc int glTFTranslatorOpts ( string $parent,
 					radioButtonGrp -edit -select 2 vFlipOpts;
 					} else {
 						radioButtonGrp -edit -select 1 vFlipOpts;
+					}
+				}
+				else if ($optionBreakDown[0] == "includeMaterials") {
+					if ($optionBreakDown[1] == "0") {
+						radioButtonGrp -edit -select 2 includeMaterialsOpts;
+					} else {
+						radioButtonGrp -edit -select 1 includeMaterialsOpts;
+					}
+				}
+				else if ($optionBreakDown[0] == "includeNormals") {
+					if ($optionBreakDown[1] == "0") {
+						radioButtonGrp -edit -select 2 includeNormalsOpts;
+					} else {
+						radioButtonGrp -edit -select 1 includeNormalsOpts;
+					}
+				}
+				else if ($optionBreakDown[0] == "transformsApplied") {
+					if ($optionBreakDown[1] == "0") {
+						radioButtonGrp -edit -select 2 transformsAppliedOpts;
+					} else {
+						radioButtonGrp -edit -select 1 transformsAppliedOpts;
+					}
+				}
+				else if ($optionBreakDown[0] == "joinMeshes") {
+					if ($optionBreakDown[1] == "0") {
+						radioButtonGrp -edit -select 2 joinMeshesOpts;
+					} else {
+						radioButtonGrp -edit -select 1 joinMeshesOpts;
 					}
 				}
 			}
@@ -96,13 +131,34 @@ global proc int glTFTranslatorOpts ( string $parent,
 		}
 		if (`optionMenu -q -select animOpts` == 1) {
 			$currentOptions = $currentOptions + "anim=none;";
-		} else {
+		} else if (`optionMenu -q -select animOpts` == 2) {
 			$currentOptions = $currentOptions + "anim=keyed;";
-		}
+		} else
+			$currentOptions = $currentOptions + "anim=frames;";
 		if (`radioButtonGrp -q -select vFlipOpts` == 2) {
 			$currentOptions += "vFlip=0;";
 		} else {
 			$currentOptions += "vFlip=1;";
+		}
+		if (`radioButtonGrp -q -select includeMaterialsOpts` == 2) {
+			$currentOptions += "includeMaterials=0;";
+		} else {
+			$currentOptions += "includeMaterials=1;";
+		}
+		if (`radioButtonGrp -q -select includeNormalsOpts` == 2) {
+			$currentOptions += "includeNormals=0;";
+		} else {
+			$currentOptions += "includeNormals=1;";
+		}
+		if (`radioButtonGrp -q -select transformsAppliedOpts` == 2) {
+			$currentOptions += "transformsApplied=0;";
+		} else {
+			$currentOptions += "transformsApplied=1;";
+		}
+		if (`radioButtonGrp -q -select joinMeshesOpts` == 2) {
+			$currentOptions += "joinMeshes=0;";
+		} else {
+			$currentOptions += "joinMeshes=1;";
 		}
 		eval($resultCallback+" \""+$currentOptions+"\"");
 		$result = 1;

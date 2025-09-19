@@ -2,7 +2,7 @@ import os
 import sys
 import maya.OpenMayaMPx as OpenMayaMPx
 import glTFExport
-
+import traceback
 
 PLUGIN_NAME = "glTF Export"
 PLUGIN_COMPANY = "Matias Codesal"
@@ -27,13 +27,16 @@ class GLTFTranslator(OpenMayaMPx.MPxFileTranslator):
             if access_mode == OpenMayaMPx.MPxFileTranslator.kExportAccessMode:
                 self._parse_args(opt_string)
                 self.kwargs['file_path'] = fullName
+                self.kwargs['selected_nodes'] = False
                 glTFExport.export(**self.kwargs)
             elif access_mode == OpenMayaMPx.MPxFileTranslator.kExportActiveAccessMode:
                 self._parse_args(opt_string)
-                raise NotImplementedError("Exported Selection not implemented yet.  Use Export All.")
-                #export_selected(file_obj.fullName(), **self.kwargs)
-        except:
-            sys.stderr.write( "Failed to write file information\n")
+                self.kwargs['file_path'] = fullName
+                self.kwargs['selected_nodes'] = True
+                glTFExport.export(**self.kwargs)
+        except Exception as e:
+            sys.stderr.write("Failed to write file information: {}\n".format(e))
+            traceback.print_exc(file=sys.stderr)
             raise
     
     def _parse_args(self, opt_string):
@@ -48,7 +51,7 @@ class GLTFTranslator(OpenMayaMPx.MPxFileTranslator):
                     else:
                         raise ValueError("resFormat option is not valid: {}".format(value))
                 elif key == 'anim':
-                    if value in ['none', 'keyed']:
+                    if value in ['none', 'keyed', 'frames']:
                         self.kwargs['anim'] = value
                     else:
                         raise ValueError("anim option is not valid: {}".format(value))
@@ -59,8 +62,36 @@ class GLTFTranslator(OpenMayaMPx.MPxFileTranslator):
                         self.kwargs['vflip'] = False
                     else:
                         raise ValueError("vFlip option is not valid: {}".format(value))
-                
-    
+                elif key == 'includeMaterials':
+                    if value == "1":
+                        self.kwargs['include_materials'] = True
+                    elif value == "0":
+                        self.kwargs['include_materials'] = False
+                    else:
+                        raise ValueError("includeMaterials option is not valid: {}".format(value))
+                elif key == 'includeNormals':
+                    if value == "1":
+                        self.kwargs['include_normals'] = True
+                    elif value == "0":
+                        self.kwargs['include_normals'] = False
+                    else:
+                        raise ValueError("includeNormals option is not valid: {}".format(value))
+                elif key == 'transformsApplied':
+                    if value == "1":
+                        self.kwargs['transforms_applied'] = True
+                    elif value == "0":
+                        self.kwargs['transforms_applied'] = False
+                    else:
+                        raise ValueError("transformsApplied option is not valid: {}".format(value))
+                elif key == 'joinMeshes':
+                    if value == "1":
+                        self.kwargs['join_meshes'] = True
+                    elif value == "0":
+                        self.kwargs['join_meshes'] = False
+                    else:
+                        raise ValueError("joinMeshes option is not valid: {}".format(value))
+
+
     def reader( self, fileObject, optionString, accessMode ):
         raise NotImplementedError()
 
@@ -81,7 +112,8 @@ def initializePlugin(mobject):
     mplugin = OpenMayaMPx.MFnPlugin(mobject, PLUGIN_COMPANY, '1.0', "Any")
     try:
         mplugin.registerFileTranslator( PLUGIN_NAME, None, translator_creator,
-                                        "glTFTranslatorOpts", "resFormat=embedded;anim=keyed;vFlip=1;")
+                                        "glTFTranslatorOpts",
+                                        "resFormat=embedded;anim=keyed;vFlip=1;includeMaterials=1;includeNormals=1;transformsApplied=0;joinMeshes=0",)
         '''
         status =  plugin.registerFileTranslator( "Lep",
                                         "lepTranslator.rgb",

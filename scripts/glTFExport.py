@@ -9,6 +9,7 @@ import base64
 import math
 import shutil
 import time
+import decimal
 
 import maya.cmds
 import maya.OpenMaya as OpenMaya
@@ -25,8 +26,6 @@ except ImportError:
     except ImportError:
         from PySide.QtGui import QImage, QColor, qRed, qGreen, qBlue, QImageWriter
         from PySide.QtCore import QByteArray
-
-# TODO don't export hidden nodes?
 
 def timeit(method):
 
@@ -52,6 +51,7 @@ class AnimOptions(object):
     NONE = 'none'
     KEYED = 'keyed'
     BAKED = 'baked'
+    FRAMES = 'frames'
 
 
 class ClassPropertyDescriptor(object):
@@ -78,6 +78,9 @@ class ExportSettings(object):
     resource_format = 'bin'
     anim = 'keyed'
     vflip = True
+    include_materials = True
+    include_normals = True
+    transforms_applied = False
     out_file = ''
     _out_dir = ''
     _out_basename = ''
@@ -88,6 +91,9 @@ class ExportSettings(object):
         cls.resource_format = 'bin'
         cls.anim = 'keyed'
         cls.vflip=True
+        cls.include_materials = True
+        cls.include_normals = True
+        cls.transforms_applied = False
         cls.out_file = ''
 
     @classproperty
@@ -106,15 +112,157 @@ class ExportSettings(object):
         return cls._out_dir
 
 
+def _is_visible_self(node):
+    cmds = maya.cmds
+    getAttr = cmds.getAttr
+    attributeQuery = cmds.attributeQuery
+
+    # Check standard visibility first
+    if attributeQuery('visibility', node=node, exists=True):
+        if not getAttr(node + '.visibility'):
+            return False
+
+    # Display layer check
+    layers = cmds.listConnections(node, type='displayLayer') or []
+    if layers and layers[0] != 'defaultLayer':
+        if not getAttr(layers[0] + '.visibility'):
+            return False
+
+    # Check drawing overrides
+    if attributeQuery('overrideEnabled', node=node, exists=True):
+        if getAttr(node + '.overrideEnabled'):
+            if attributeQuery('overrideVisibility', node=node, exists=True):
+                if not getAttr(node + '.overrideVisibility'):
+                    return False
+    return True
+
+def _is_node_visible(node):
+    # Get full path to root in one call
+    paths = maya.cmds.ls(node, long=True)
+    if not paths:
+        return False
+
+    nodes = paths[0].split('|')[1:] # Skip first empty element
+
+    # Build full paths for each ancestor
+    current_path = ''
+    for node_name in nodes:
+        current_path += '|' + node_name
+        if not _is_visible_self(current_path):
+            return False
+    return True
+
+def _get_visible_nodes(has_selection, selected=[]):
+    if has_selection:
+        # Filter to top-level transforms only
+        top_level = []
+        for node in selected:
+            if maya.cmds.objectType(node) == 'transform':
+                parent = maya.cmds.listRelatives(node, parent=True, fullPath=True)
+                if not parent or parent[0] not in selected:
+                    top_level.append(node)
+
+        # Only export if selection is non-empty
+        if not top_level or len(top_level) == 0:
+            raise RuntimeError('No objects selected. Nothing to export.')
+
+        # Filter out invisible top-level nodes early
+        export_nodes = [n for n in top_level if _is_node_visible(n)]
+    else:
+        export_nodes = [n for n in maya.cmds.ls(assemblies=True, long=True) if _is_node_visible(n)]
+
+    return export_nodes
+
+def _get_visible_mesh_transforms(has_selection, selected=[]):
+    if has_selection:
+        mesh_shapes = maya.cmds.listRelatives(selected, ad=True, type='mesh', fullPath=True) or []
+    else:
+        mesh_shapes = maya.cmds.ls(type='mesh', long=True) or []
+
+    seen = set()
+    transforms = []
+    for shape in mesh_shapes:
+        parents = maya.cmds.listRelatives(shape, parent=True, fullPath=True) or []
+        for tf in parents:
+            if tf not in seen and _is_node_visible(tf):
+                seen.add(tf)
+                transforms.append(tf)
+
+    return transforms
+
+def _join_transforms(transforms, group_name):
+    if not transforms:
+        return None
+
+    frame_group = maya.cmds.group(em=True, name=f"{group_name}")
+    duplicates = []
+
+    for tf in transforms:
+        if not maya.cmds.objExists(tf):
+            continue
+        short_name = maya.cmds.ls(tf, sn=True)[0]
+        dup_name = f"{short_name}_dup"
+        dup = maya.cmds.duplicate(tf, rr=True, name=dup_name)[0]
+        maya.cmds.delete(dup, ch=True)  # remove construction history immediately
+        maya.cmds.parent(dup, frame_group)
+        duplicates.append(dup)
+
+    united = None
+    if len(duplicates) > 1:
+        united = maya.cmds.polyUnite(duplicates, ch=False, mergeUVSets=True,
+                                    name=f"{group_name}_joined")[0]
+        maya.cmds.delete(united, ch=True)
+        maya.cmds.polyMergeVertex(united, d=1e-05, am=True, ch=False)
+
+    elif len(duplicates) == 1:
+        maya.cmds.polyMergeVertex(duplicates[0], d=1e-05, am=True, ch=False)
+        united = duplicates[0]
+
+    # Remove duplicates after unite; some items may be renamed/consumed.
+    if maya.cmds.objExists(frame_group):
+        maya.cmds.delete(frame_group)
+
+    return united
+
 class GLTFExporter(object):
     def __init__(self, **kwargs):
-        self.output = {
-            "asset": {
-                "version": "2.0",
-                "generator": "maya-glTFExport",
-            }
-        }
         ExportSettings.set_defaults()
+
+        ExportSettings.out_file = kwargs.get('file_path', '')
+        ExportSettings.resource_format = kwargs.get('resource_format', 'bin')
+        ExportSettings.anim = kwargs.get('anim', 'keyed')
+        ExportSettings.vflip = kwargs.get('vflip', True)
+        ExportSettings.include_materials = kwargs.get('include_materials', True)
+        ExportSettings.include_normals = kwargs.get('include_normals', True)
+        ExportSettings.transforms_applied = kwargs.get('transforms_applied', False)
+        self.selected_nodes = kwargs.get('selected_nodes', False)
+        self.join_meshes = kwargs.get('join_meshes', False)
+
+    def run(self):
+        # Preserve user scene context (selection and time)
+        prev_selection = maya.cmds.ls(selection=True, long=True) or []
+        prev_time = maya.cmds.currentTime(query=True)
+
+        # Make sure output path is valid
+        if not ExportSettings.out_file:
+            ExportSettings.out_file = maya.cmds.fileDialog2(
+                caption="Specify a name for the file to export.", fileMode=0
+            )[0]
+
+        _, ext = os.path.splitext(ExportSettings.out_file)
+        if ext.lower() not in ['.glb', '.gltf']:
+            raise Exception("Output file must have gltf or glb extension.")
+        ExportSettings.file_format = ext[1:]
+
+        export_anims_as_models = ExportSettings.anim == AnimOptions.FRAMES
+        if export_anims_as_models:
+            start = int(maya.cmds.playbackOptions(q=True, min=True))
+            end = int(maya.cmds.playbackOptions(q=True, max=True))
+            animRange = range(start, end)
+        else:
+            animRange = [0]
+
+        # Reset static registries
         Scene.set_defaults()
         Node.set_defaults()
         Mesh.set_defaults()
@@ -127,57 +275,108 @@ class GLTFExporter(object):
         BufferView.set_defaults()
         Accessor.set_defaults()
 
-        ExportSettings.out_file = kwargs.get('file_path', '')
-        ExportSettings.resource_format = kwargs.get('resource_format', 'bin')
-        ExportSettings.anim = kwargs.get('anim', 'keyed')
-        ExportSettings.vflip = kwargs.get('vflip', True)
+        # --- Undo-safe block ---
+        undo_was_enabled = maya.cmds.undoInfo(q=True, state=True)
+        try:
+            # Ensure undo is enabled and open a chunk
+            if not undo_was_enabled:
+                maya.cmds.undoInfo(state=True)
+            maya.cmds.undoInfo(openChunk=True)
 
-    def run(self):
-        if not ExportSettings.out_file:
-            ExportSettings.out_file = maya.cmds.fileDialog2(caption="Specify a name for the file to export.",
-                                                        fileMode=0)[0]
-        _, ext = os.path.splitext(ExportSettings.out_file)
-        if ext.lower() not in ['.glb', '.gltf']:
-            raise Exception("Output file must have gltf or glb extension.")
-        ExportSettings.file_format = ext[1:]
+            for t in animRange:
+                if export_anims_as_models:
+                    maya.cmds.currentTime(t, edit=True)
 
-        if not os.path.exists(ExportSettings.out_dir):
-            os.makedirs(ExportSettings.out_dir)
+                if self.join_meshes:
+                    meshes = _get_visible_mesh_transforms(self.selected_nodes, prev_selection)
+                    dup_root = _join_transforms(meshes, f'GLTF_JoinTmp{t}')
+                    export_nodes = [dup_root] if dup_root else []
+                else:
+                    export_nodes = _get_visible_nodes(self.selected_nodes, prev_selection)
 
-        # TODO: validate file_path and type
-        scene = Scene()
-        # we only support exporting single scenes,
-        # so the first scene is the active scene
-        self.output['scene'] = 0
-        if Scene.instances:
-            self.output['scenes'] = Scene.instances
-        if Node.instances:
-            self.output['nodes'] = Node.instances
-        if Mesh.instances:
-            self.output['meshes'] = Mesh.instances
-        if Camera.instances:
-            self.output['cameras'] = Camera.instances
-        if Material.instances:
-            self.output['materials'] = Material.instances
-        if Image.instances:
-            self.output['images'] = Image.instances
-        if Texture.instances:
-            self.output['textures'] = Texture.instances
-        if Animation.instances and Animation.instances[0].channels:
-            self.output['animations'] = Animation.instances
-        if Buffer.instances:
-            self.output['buffers'] = Buffer.instances
-        if BufferView.instances:
-            self.output['bufferViews'] = BufferView.instances
-        if Accessor.instances:
-            self.output['accessors'] = Accessor.instances
+                if not export_nodes:
+                    if export_anims_as_models:
+                        continue
+                    else:
+                        raise RuntimeError('Selected objects are not visible. Nothing to export.')
 
-        if not Scene.instances[0].nodes:
-            raise RuntimeError('Scene is empty.  No file will be exported.')
+                Scene(maya_nodes=export_nodes)
+
+                # Delete temporary joined mesh once scene is created
+                if self.join_meshes and dup_root and maya.cmds.objExists(dup_root):
+                    maya.cmds.delete(dup_root)
+
+                if not export_anims_as_models and not Scene.instances[0].nodes:
+                    raise RuntimeError('Scene is empty. No file will be exported.')
+
+            # Assemble the final glTF structure
+            output = {
+                "asset": {"version": "2.0", "generator": "maya-glTFExport"},
+                "scene": 0
+            }
+
+            if Scene.instances: output['scenes'] = Scene.instances
+            if Node.instances: output['nodes'] = Node.instances
+            if Mesh.instances: output['meshes'] = Mesh.instances
+            if Camera.instances: output['cameras'] = Camera.instances
+            if Material.instances: output['materials'] = Material.instances
+            if Image.instances: output['images'] = Image.instances
+            if Texture.instances: output['textures'] = Texture.instances
+            if Animation.instances and Animation.instances[0].channels:
+                output['animations'] = Animation.instances
+            if Buffer.instances: output['buffers'] = Buffer.instances
+            if BufferView.instances: output['bufferViews'] = BufferView.instances
+            if Accessor.instances: output['accessors'] = Accessor.instances
+
+            if not os.path.exists(ExportSettings.out_dir):
+                os.makedirs(ExportSettings.out_dir)
+
+            self._write_output(ExportSettings.out_file, output)
+
+        except Exception:
+            # In case of crash, we still close chunk and undo partial work
+            maya.cmds.undoInfo(closeChunk=True)
+            if undo_was_enabled:
+                try:
+                    maya.cmds.undo()
+                except Exception:
+                    pass
+            raise
+
+        finally:
+            # Always close undo chunk if still open
+            try:
+                maya.cmds.undoInfo(closeChunk=True)
+            except Exception:
+                pass
+
+            # Clean up temp geometry via undo if possible
+            if undo_was_enabled:
+                try:
+                    maya.cmds.undo()
+                except Exception:
+                    pass
+            else:
+                maya.cmds.undoInfo(state=False)
+                try:
+                    maya.cmds.select(clear=True)
+                    if prev_selection:
+                        # Ensure objects still exist and use long names
+                        existing = [n for n in prev_selection if maya.cmds.objExists(n)]
+                        if existing:
+                            maya.cmds.select(existing, replace=True)
+                except Exception:
+                    pass
+
+                try:
+                    maya.cmds.currentTime(prev_time, edit=True)
+                except Exception:
+                    pass
+
+    def _write_output(self, path, output):
         if ExportSettings.file_format == 'glb':
-
-            json_str = json.dumps(self.output, sort_keys=True, separators=(',', ':'), cls=GLTFEncoder)
-            json_bin = bytearray(json_str.encode(encoding='latin-1'))
+            json_str = json.dumps(output, sort_keys=True, separators=(',', ':'), cls=GLTFEncoder)
+            json_bin = bytearray(json_str.encode('utf-8'))
             # 4-byte-aligned
             aligned_len = (len(json_bin) + 3) & ~3
             for i in range(aligned_len - len(json_bin)):
@@ -200,15 +399,12 @@ class GLTFExporter(object):
                 bin_out.extend(struct.pack('<I', len(buffer)))
                 bin_out.extend(struct.pack('<I', 0x004E4942)) # BIN in binary
                 bin_out += buffer.byte_str
-
-            with open(ExportSettings.out_file, 'wb') as outfile:
+            with open(path, 'wb') as outfile:
                 outfile.write(bin_out)
         else:
-            with open(ExportSettings.out_file, 'w') as outfile:
-                json.dump(self.output, outfile, cls=GLTFEncoder)
-
-            if (ExportSettings.resource_format == ResourceFormats.BIN
-                    and Buffer.instances):
+            with open(path, 'w') as outfile:
+                json.dump(output, outfile, cls=GLTFEncoder)
+            if (ExportSettings.resource_format == ResourceFormats.BIN and Buffer.instances):
                 buffer = Buffer.instances[0]
                 with open(ExportSettings.out_dir + "/" + buffer.uri, 'wb') as outfile:
                     outfile.write(buffer.byte_str)
@@ -239,24 +435,37 @@ class Scene(ExportItem):
     def set_defaults(cls):
         cls.instances = []
 
-    def __init__(self, name="defaultScene", maya_nodes=None):
+    def __init__(self, name=None, maya_nodes=None):
         super(Scene, self).__init__(name=name)
         self.index = len(Scene.instances)
         Scene.instances.append(self)
         anim = None
-        if not ExportSettings.anim == AnimOptions.NONE:
+        if not ExportSettings.anim != AnimOptions.KEYED:
             anim = Animation('defaultAnimation')
         self.nodes = []
-        if maya_nodes:
-            self.maya_nodes = maya_nodes
-        else:
-            self.maya_nodes = maya.cmds.ls(assemblies=True, long=True)
+        self.maya_nodes = maya_nodes
+
+        def collect_mesh_nodes(node, out):
+            if node.mesh:
+                out.append(node)
+            for child in getattr(node, 'children', []):
+                collect_mesh_nodes(child, out)
+
         for transform in self.maya_nodes:
             if transform not in Camera.default_cameras:
-                self.nodes.append(Node(transform, anim))
+                if not _is_node_visible(transform):
+                    continue
+
+                node = Node(transform, anim)
+                if ExportSettings.transforms_applied:
+                    mesh_nodes = []
+                    collect_mesh_nodes(node, mesh_nodes)
+                    self.nodes.extend(mesh_nodes)
+                else:
+                    self.nodes.append(node)
 
     def to_json(self):
-        scene_def = {"name":self.name, "nodes":[node.index for node in self.nodes]}
+        scene_def = {"nodes":[node.index for node in self.nodes]}
         return scene_def
 
 
@@ -279,21 +488,30 @@ class Node(ExportItem):
         self.maya_node = maya_node
         name = maya.cmds.ls(maya_node, shortNames=True)[0]
         super(Node, self).__init__(name=name)
-        self.index = len(Node.instances)
-        Node.instances.append(self)
         self.children = []
-        self.translation = maya.cmds.getAttr(self.maya_node+'.translate')[0]
-        self.rotation = self._get_rotation_quaternion()
-        self.scale = maya.cmds.getAttr(self.maya_node+'.scale')[0]
+        self.mesh = None
+        self.camera = None
+        self.is_visible = True
+        # Skip invisible transforms entirely (robust: includes display layers and overrides)
+        if not _is_node_visible(self.maya_node):
+            self.is_visible = False
+            return
+        if not ExportSettings.transforms_applied:
+            self.translation = maya.cmds.getAttr(self.maya_node+'.translate')[0]
+            self.rotation = self._get_rotation_quaternion()
+            self.rotation_euler = maya.cmds.getAttr(self.maya_node+'.rotate')[0]
+            self.scale = maya.cmds.getAttr(self.maya_node+'.scale')[0]
         if anim:
             self._get_animation(anim)
         maya_children = maya.cmds.listRelatives(self.maya_node, children=True, fullPath=True)
         if maya_children:
             for child in maya_children:
+                if not _is_node_visible(child):
+                    continue
+
                 childType = maya.cmds.objectType(child)
-                if childType == 'mesh' and not maya.cmds.getAttr(child + ".intermediateObject"):
-                    mesh = Mesh(child)
-                    self.mesh = mesh
+                if childType == 'mesh':
+                    self.mesh = Mesh(child)
                 elif childType == 'camera':
                     if maya.cmds.camera(child, query=True, orthographic=True):
                         cam = OrthographicCamera(child)
@@ -302,7 +520,12 @@ class Node(ExportItem):
                     self.camera = cam
                 elif childType == 'transform':
                     node = Node(child, anim)
-                    self.children.append(node)
+                    if getattr(node, 'is_visible', True):
+                        self.children.append(node)
+
+        if not ExportSettings.transforms_applied or (ExportSettings.transforms_applied and self.mesh):
+            self.index = len(Node.instances)
+            Node.instances.append(self)
 
     def _get_animation(self, anim):
         if maya.cmds.keyframe(self.maya_node, attribute='translate', query=True, keyframeCount=True):
@@ -342,20 +565,24 @@ class Node(ExportItem):
 
     def to_json(self):
         node_def = {}
-        if self.matrix:
-            node_def['matrix'] = self.matrix
-        if self.translation:
-            node_def['translation'] = self.translation
-        if self.rotation:
-            node_def['rotation'] = self.rotation
-        if self.scale:
-            node_def['scale'] = self.scale
-        if self.children:
-            node_def['children'] = [child.index for child in self.children]
-        if self.mesh:
-            node_def['mesh'] = self.mesh.index
-        if self.camera:
-            node_def['camera'] = self.camera.index
+        if ExportSettings.transforms_applied:
+            if self.mesh:
+                node_def['mesh'] = self.mesh.index
+        else:
+            if self.matrix:
+                node_def['matrix'] = self.matrix
+            if self.translation:
+                node_def['translation'] = self.translation
+            if self.rotation:
+                node_def['rotation'] = self.rotation
+            if self.scale:
+                node_def['scale'] = self.scale
+            if self.children:
+                node_def['children'] = [child.index for child in self.children]
+            if self.mesh:
+                node_def['mesh'] = self.mesh.index
+            if self.camera:
+                node_def['camera'] = self.camera.index
         return node_def
 
 
@@ -381,90 +608,99 @@ class Mesh(ExportItem):
         Mesh.instances.append(self)
 
         self._getMeshData()
-        self._getMaterial()
+        if ExportSettings.include_materials:
+            self._getMaterial()
 
     def to_json(self):
-        mesh_def = {"primitives" : [ {
-                        "attributes" : {
-                          "POSITION" : self.position_accessor.index,
-                          "NORMAL": self.normal_accessor.index ,
-                          "TEXCOORD_0": self.texcoord0_accessor.index
-                        },
-                        "indices" : self.indices_accessor.index,
-                        "material" : self.material.index
-                      } ]
-                    }
+        attributes = {"POSITION": self.position_accessor.index}
+        if ExportSettings.include_normals and self.normal_accessor is not None:
+            attributes["NORMAL"] = self.normal_accessor.index
+        if ExportSettings.include_normals and self.texcoord0_accessor is not None:
+            attributes["TEXCOORD_0"] = self.texcoord0_accessor.index
+        mesh_def = {"primitives": [{
+            "attributes": attributes,
+            "indices": self.indices_accessor.index
+        }]}
+        if ExportSettings.include_materials and self.material is not None:
+            mesh_def["primitives"][0]["material"] = self.material.index
         return mesh_def
 
     def _getMaterial(self):
         shadingGrps = maya.cmds.listConnections(self.maya_node,type='shadingEngine')
-        # We currently only support one materical per mesh, so we'll just grab the first one.
-        # TODO: support facegroups as glTF primitivies to support one material per facegroup
-        shader = maya.cmds.ls(maya.cmds.listConnections(shadingGrps),materials=True)[0]
-        self.material = Material(shader)
+
+        if shadingGrps:
+            # We currently only support one material per mesh, so we'll just grab the first one.
+            # TODO: support facegroups as glTF primitivies to support one material per facegroup
+            shader = maya.cmds.ls(maya.cmds.listConnections(shadingGrps),materials=True)[0]
+            self.material = Material(shader)
+        else:
+            self.material = None
 
     @timeit
     def _getMeshData(self):
-        maya.cmds.select(self.maya_node)
-        selList = OpenMaya.MSelectionList()
-        OpenMaya.MGlobal.getActiveSelectionList(selList)
+        # Build dag path directly without altering selection
+        sel_list = OpenMaya.MSelectionList()
+        sel_list.add(self.maya_node)
         meshPath = OpenMaya.MDagPath()
-        selList.getDagPath(0, meshPath)
-        meshIt = OpenMaya.MItMeshPolygon(meshPath)
+        sel_list.getDagPath(0, meshPath)
         meshFn = OpenMaya.MFnMesh(meshPath)
         dagFn = OpenMaya.MFnDagNode(meshPath)
         boundingBox = dagFn.boundingBox()
         do_color = meshFn.numColorSets() > 0
         indices = []
-        positions = [None]*meshFn.numVertices()
-        normals = [None]*meshFn.numVertices()
-        colors = [None]*meshFn.numVertices()
-        uvs = [None]*meshFn.numVertices()
+        num_vertices = meshFn.numVertices()
+        positions = [None] * num_vertices
+        normals = [None] * num_vertices if ExportSettings.include_normals else None
+        colors = [None] * num_vertices
+        uvs = [None] * num_vertices if ExportSettings.include_normals else None
+
+        # When transforms_applied is False, use points from meshIt.getTriangles for positions
+        if ExportSettings.transforms_applied:
+            points_array = OpenMaya.MPointArray()
+            meshFn.getPoints(points_array, OpenMaya.MSpace.kWorld)
+            for i in range(num_vertices):
+                positions[i] = (points_array[i].x, points_array[i].y, points_array[i].z)
+        else:
+            pass  # positions will be set in the triangle loop below
+
+        # Continue with normals, colors, uvs
+        polyNormals = OpenMaya.MFloatVectorArray()
+        meshFn.getNormals(polyNormals, OpenMaya.MSpace.kWorld)
+        meshIt = OpenMaya.MItMeshPolygon(meshPath)
+        uv_util = OpenMaya.MScriptUtil()
+        uv_util.createFromList([0,0], 2)
+        uv_ptr = uv_util.asFloat2Ptr()
         ids = OpenMaya.MIntArray()
         points = OpenMaya.MPointArray()
         if do_color:
             vertexColorList = OpenMaya.MColorArray()
             meshFn.getFaceVertexColors(vertexColorList)
-        normal = OpenMaya.MVector()
         face_verts = OpenMaya.MIntArray()
-        polyNormals = OpenMaya.MFloatVectorArray()
-        meshFn.getNormals(polyNormals)
-        uv_util = OpenMaya.MScriptUtil()
-        uv_util.createFromList([0,0], 2 )
-        uv_ptr = uv_util.asFloat2Ptr()
         while not meshIt.isDone():
             meshIt.getTriangles(points, ids)
             meshIt.getVertices(face_verts)
             face_vertices = list(face_verts)
             for point, vertex_index in zip(points, ids):
                 indices.append(vertex_index)
-                pos = (point.x, point.y, point.z)
+                if not ExportSettings.transforms_applied:
+                    positions[vertex_index] = (point.x, point.y, point.z)
                 face_vert_id = face_vertices.index(vertex_index)
-                norm_id = meshIt.normalIndex(face_vert_id)
-                norm = polyNormals[norm_id]
-                norm = (norm.x, norm.y, norm.z)
-                meshIt.getUV(face_vert_id, uv_ptr, meshFn.currentUVSetName())
-                u = uv_util.getFloat2ArrayItem( uv_ptr, 0, 0 )
-                v = uv_util.getFloat2ArrayItem( uv_ptr, 0, 1 )
-                # flip V for openGL
-                # This fails if the the UV is exactly on the border (e.g. (0.5,1))
-                # but we really don't know what udim it's in for that case.
-                if ExportSettings.vflip:
-                    v = int(v) + (1 - (v % 1))
-                uv = (u, v)
-                if not positions[vertex_index]:
-                    positions[vertex_index] = pos
+                if ExportSettings.include_normals:
+                    norm_id = meshIt.normalIndex(face_vert_id)
+                    norm = polyNormals[norm_id]
+                    norm = (norm.x, norm.y, norm.z)
+                    meshIt.getUV(face_vert_id, uv_ptr, meshFn.currentUVSetName())
+                    u = uv_util.getFloat2ArrayItem(uv_ptr, 0, 0)
+                    v = uv_util.getFloat2ArrayItem(uv_ptr, 0, 1)
+                    # flip V for openGL
+                    # This fails if the the UV is exactly on the border (e.g. (0.5,1))
+                    # but we really don't know what udim it's in for that case.
+                    if ExportSettings.vflip:
+                        v = int(v) + (1 - (v % 1))
+                    uv = (u, v)
+                if ExportSettings.include_normals:
                     normals[vertex_index] = norm
                     uvs[vertex_index] = uv
-                elif not ( positions[vertex_index] == pos and
-                            normals[vertex_index] == norm and
-                            uvs[vertex_index] == uv):
-                    positions.append(pos)
-                    normals.append(norm)
-                    uvs.append(uv)
-                    indices[-1] = len(positions)-1
-
-
                 if do_color:
                     color = vertexColorList[vertex_index]
                     colors[vertex_index] = (color.r, color.g, color.b)
@@ -485,12 +721,26 @@ class Mesh(ExportItem):
 
         self.indices_accessor = Accessor(indices, "SCALAR", idx_component_type, 34963, primary_buffer, name=self.name + '_idx')
         self.position_accessor = Accessor(positions, "VEC3", ComponentTypes.FLOAT, 34962, primary_buffer, name=self.name + '_pos')
-        bbox_max = boundingBox.max()
-        self.position_accessor.max_ = [bbox_max[0],bbox_max[1],bbox_max[2]]
-        bbox_min = boundingBox.min()
-        self.position_accessor.min_ =  [bbox_min[0],bbox_min[1],bbox_min[2]]
-        self.normal_accessor = Accessor(normals, "VEC3", ComponentTypes.FLOAT, 34962, primary_buffer, name=self.name + '_norm')
-        self.texcoord0_accessor = Accessor(uvs, "VEC2", ComponentTypes.FLOAT, 34962, primary_buffer, name=self.name + '_uv')
+
+        def to_f32(val):
+            return struct.unpack('<f', struct.pack('<f', val))[0]
+
+        if ExportSettings.transforms_applied:
+            xs, ys, zs = zip(*positions)
+            self.position_accessor.min_ = [to_f32(min(xs)), to_f32(min(ys)), to_f32(min(zs))]
+            self.position_accessor.max_ = [to_f32(max(xs)), to_f32(max(ys)), to_f32(max(zs))]
+        else:
+            bbox_max = boundingBox.max()
+            bbox_min = boundingBox.min()
+            self.position_accessor.max_ = [to_f32(bbox_max[0]), to_f32(bbox_max[1]), to_f32(bbox_max[2])]
+            self.position_accessor.min_ = [to_f32(bbox_min[0]), to_f32(bbox_min[1]), to_f32(bbox_min[2])]
+
+        if ExportSettings.include_normals:
+            self.normal_accessor = Accessor(normals, "VEC3", ComponentTypes.FLOAT, 34962, primary_buffer, name=self.name + '_norm')
+            self.texcoord0_accessor = Accessor(uvs, "VEC2", ComponentTypes.FLOAT, 34962, primary_buffer, name=self.name + '_uv')
+        else:
+            self.normal_accessor = None
+            self.texcoord0_accessor = None
 
 
 class Material(ExportItem):
@@ -544,27 +794,21 @@ class Material(ExportItem):
             Material.instances.append(self)
             return
 
-        self.maya_node = maya_node
-        name = maya.cmds.ls(maya_node, shortNames=True)[0]
-        super(Material, self).__init__(name=name)
-
-        self.index = len(Material.instances)
-        Material.instances.append(self)
-
-        maya_obj_type = maya.cmds.objectType(maya_node)
-        if maya_obj_type in ['phong', 'lambert', 'blinn']:
-            color_conn = maya.cmds.listConnections(self.maya_node+'.color')
-            trans = list(maya.cmds.getAttr(self.maya_node+'.transparency')[0])
-            self.transparency = sum(trans) / float(len(trans))
-            if color_conn and maya.cmds.objectType(color_conn[0]) == 'file':
-                file_node = color_conn[0]
-                file_path = maya.cmds.getAttr(file_node+'.fileTextureName')
-                image = Image(file_path)
-                self.base_color_texture = Texture(image)
-            else:
-                color = list(maya.cmds.getAttr(self.maya_node+'.color')[0])
-                color.append(1-self.transparency)
-                self.base_color_factor = color
+        if maya_node is not None:
+            maya_obj_type = maya.cmds.objectType(maya_node)
+            if maya_obj_type in ['phong', 'lambert', 'blinn']:
+                color_conn = maya.cmds.listConnections(self.maya_node+'.color')
+                trans = list(maya.cmds.getAttr(self.maya_node+'.transparency')[0])
+                self.transparency = sum(trans) / float(len(trans))
+                if color_conn and maya.cmds.objectType(color_conn[0]) == 'file':
+                    file_node = color_conn[0]
+                    file_path = maya.cmds.getAttr(file_node+'.fileTextureName')
+                    image = Image(file_path)
+                    self.base_color_texture = Texture(image)
+                else:
+                    color = list(maya.cmds.getAttr(self.maya_node+'.color')[0])
+                    color.append(1-self.transparency)
+                    self.base_color_factor = color
 
             if maya_obj_type == 'lambert':
                 self.metallic_factor = 0
@@ -650,6 +894,14 @@ class Material(ExportItem):
             else:
                 emissive = list(maya.cmds.getAttr(self.maya_node+'.emissive')[0])
                 self.emissive_factor = emissive
+
+        self.maya_node = maya_node
+        name = maya.cmds.ls(maya_node, shortNames=True)[0]
+        super(Material, self).__init__(name=name)
+
+        self.index = len(Material.instances)
+        Material.instances.append(self)
+
 
     def _create_metallic_roughness_map(self, metal_map, rough_map):
 
